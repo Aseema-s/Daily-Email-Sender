@@ -146,10 +146,10 @@ class DailyEmailApp:
     # --- EMAIL LOGIC ---
     def send_email_task(self):
         provider = self.combo_provider.get()
-        sender_email = self.entry_email.get()
-        sender_password = self.entry_password.get()
-        content_path = self.entry_content_file.get()
-        recipient_path = self.entry_recipient_file.get()
+        sender_email = self.entry_email.get().strip()
+        sender_password = self.entry_password.get().strip()
+        content_path = self.entry_content_file.get().strip()
+        recipient_path = self.entry_recipient_file.get().strip()
         
         if not all([sender_email, sender_password, content_path, recipient_path]):
             self.log("Error: Missing fields. Please fill all inputs.")
@@ -169,28 +169,50 @@ class DailyEmailApp:
             smtp_port = 587
 
         try:
-            # 1. Read Content
+            # 1. Read Content (Reads LIVE from the hard drive to get your latest saved changes)
             try:
                 df_content = pd.read_excel(content_path)
                 html_table = df_content.to_html(index=False, border=1, justify="center")
+            except PermissionError:
+                self.log("Error: Content Excel is open and locked. Please close the Excel window.")
+                return
             except Exception as e:
                 self.log(f"Error reading content file: {e}")
                 return
 
-            # 2. Read Recipients
+            # 2. Read Recipients (Reads LIVE from the hard drive)
             try:
                 df_recipients = pd.read_excel(recipient_path)
                 if 'Email' in df_recipients.columns:
-                    recipient_list = df_recipients['Email'].dropna().tolist()
+                    raw_emails = df_recipients['Email'].dropna().astype(str).tolist()
                 else:
-                    recipient_list = df_recipients.iloc[:, 0].dropna().tolist()
+                    raw_emails = df_recipients.iloc[:, 0].dropna().astype(str).tolist()
+                
+                # Robust cleaning: handles empty spaces, multiple emails per cell, and drops invalid entries
+                recipient_list = []
+                for raw in raw_emails:
+                    # Split by commas or semicolons if multiple emails are in a single cell
+                    for email in raw.replace(';', ',').split(','):
+                        clean_email = email.strip()
+                        # Check if it looks like a valid email (contains '@' and no spaces)
+                        if '@' in clean_email and ' ' not in clean_email:
+                            recipient_list.append(clean_email)
+                
+                # Remove duplicates but preserve order
+                recipient_list = list(dict.fromkeys(recipient_list))
+
+            except PermissionError:
+                self.log("Error: Recipient Excel is open and locked. Please close the Excel window.")
+                return
             except Exception as e:
                 self.log(f"Error reading recipient file: {e}")
                 return
 
             if not recipient_list:
-                self.log("No recipients found in file.")
+                self.log("No valid email addresses found in the recipient file.")
                 return
+
+            self.log(f"Found {len(recipient_list)} email(s). Preparing to send...")
 
             # 3. Connect and Send
             self.log(f"Connecting to {smtp_server}...")
@@ -199,8 +221,9 @@ class DailyEmailApp:
             server.login(sender_email, sender_password)
 
             success_count = 0
-            for recipient in recipient_list:
+            for index, recipient in enumerate(recipient_list, 1):
                 try:
+                    self.log(f"Sending ({index}/{len(recipient_list)}) to: {recipient}")
                     msg = MIMEMultipart()
                     msg['From'] = sender_email
                     msg['To'] = recipient
@@ -221,11 +244,14 @@ class DailyEmailApp:
                     msg.attach(MIMEText(body, 'html'))
                     server.send_message(msg)
                     success_count += 1
+                    
+                    # Pause for 1.5 seconds between emails to prevent SMTP rate-limiting
+                    time.sleep(1.5)
                 except Exception as e:
                     self.log(f"Failed to send to {recipient}: {e}")
 
             server.quit()
-            self.log(f"Job Finished. Sent {success_count} emails successfully.")
+            self.log(f"Job Finished. Sent {success_count} out of {len(recipient_list)} emails successfully.")
 
         except Exception as e:
             self.log(f"Critical Error: {e}")
